@@ -1,0 +1,25 @@
+<?php
+// Masyarakat layout
+$sidebarNav = '
+<a href="' . base_url('masyarakat/dashboard') . '" class="nav-link ' . (service('uri')->getSegment(2) === 'dashboard' ? 'active' : '') . '">
+    <i class="bi bi-house"></i> Beranda
+</a>
+<a href="' . base_url('masyarakat/report') . '" class="nav-link ' . (service('uri')->getSegment(2) === 'report' ? 'active' : '') . '">
+    <i class="bi bi-plus-circle"></i> Laporkan Sampah
+</a>
+<a href="' . base_url('masyarakat/history') . '" class="nav-link ' . (service('uri')->getSegment(2) === 'history' ? 'active' : '') . '">
+    <i class="bi bi-clock-history"></i> Riwayat Laporan
+</a>
+<a href="' . base_url('masyarakat/profile') . '" class="nav-link ' . (service('uri')->getSegment(2) === 'profile' ? 'active' : '') . '">
+    <i class="bi bi-person-circle"></i> Profil Saya
+</a>';
+
+if (session()->get('is_impersonating')) {
+    $sidebarNav .= '
+<hr class="my-2" style="border-color: rgba(255,255,255,0.1);">
+<a href="' . base_url('exit-impersonation') . '" class="nav-link text-warning">
+    <i class="bi bi-shield-lock"></i> Keluar ke Admin
+</a>';
+}
+
+echo view('layouts/_base', array_merge(get_defined_vars(), ['sidebarNav' => $sidebarNav]));

@@ -1,0 +1,252 @@
+<?php
+
+namespace App\Controllers\Admin;
+
+use App\Controllers\BaseController;
+use App\Models\SettingModel;
+
+/**
+ * SettingsController
+ *
+ * Full CRUD for the `settings` table via a single admin GUI.
+ * This is what makes SAMPAHAN 100% white-label: every piece of identity
+ * (name, logo, favicon, city, map centre, SMTP, GeoJSON) is changed here.
+ */
+class SettingsController extends BaseController
+{
+    private SettingModel $settingModel;
+
+    public function __construct()
+    {
+        $this->settingModel = new SettingModel();
+    }
+
+    public function index(): string
+    {
+        // Group settings for organised tabs in the view
+        $data = [
+            'appearance' => $this->settingModel->getGroup('appearance'),
+            'map'        => $this->settingModel->getGroup('map'),
+            'mail'       => $this->settingModel->getGroup('mail'),
+            'general'    => $this->settingModel->getGroup('general'),
+            'captcha'    => $this->settingModel->getGroup('captcha'),
+        ];
+
+        return $this->render('layouts/admin', 'admin/settings', $data);
+    }
+
+    /**
+     * Save non-file settings (text fields, selects, toggles) in bulk.
+     */
+    public function save()
+    {
+        // Whitelist of plain-text keys grouped by their settings group
+        $groupedKeys = [
+            'appearance' => ['app_name', 'city_name'],
+            'map'        => ['map_center_lat', 'map_center_long', 'map_default_zoom'],
+            'mail'       => ['smtp_host', 'smtp_user', 'smtp_pass', 'smtp_port', 'smtp_crypto', 'smtp_from_name'],
+            'general'    => ['enable_email_verification', 'duplicate_radius_meters', 'app_timezone'],
+            'captcha'    => ['captcha_provider', 'captcha_site_key', 'captcha_secret_key'],
+        ];
+
+        foreach ($groupedKeys as $group => $keys) {
+            foreach ($keys as $key) {
+                $value = $this->request->getPost($key);
+                if ($value !== null) {
+                    $this->settingModel->setValue($key, $value, $group);
+                }
+            }
+        }
+
+        // Self-hosted captcha needs no API keys — clear them to avoid confusion
+        if ($this->request->getPost('captcha_provider') === 'selfhosted') {
+            $this->settingModel->setValue('captcha_site_key',   '', 'captcha');
+            $this->settingModel->setValue('captcha_secret_key', '', 'captcha');
+        }
+
+        $tab = $this->request->getPost('_tab') ?? '';
+        $hash = in_array($tab, ['#tab-appearance','#tab-map','#tab-mail','#tab-general','#tab-captcha'], true) ? $tab : '';
+
+        return redirect()->to('/admin/settings' . $hash)->with('success', 'Pengaturan disimpan.');
+    }
+
+    /**
+     * Upload & replace App Logo and/or Favicon in a single form.
+     */
+    public function uploadBrand()
+    {
+        $logoFile    = $this->request->getFile('app_logo');
+        $faviconFile = $this->request->getFile('app_favicon');
+
+        if ((! $logoFile || ! $logoFile->isValid()) && (! $faviconFile || ! $faviconFile->isValid())) {
+            return redirect()->to('/admin/settings#tab-appearance')->with('error', 'Pilih setidaknya logo atau favicon yang valid untuk diunggah.');
+        }
+
+        $messages = [];
+        $errors   = [];
+
+        if ($logoFile && $logoFile->isValid()) {
+            $upload = $this->handleUpload('app_logo', 'brand');
+
+            if (! $upload) {
+                $errors[] = 'Upload logo gagal. Pastikan file adalah gambar valid.';
+            } else {
+                $oldPath = $this->settingModel->get('app_logo');
+                $this->deleteOldFile($oldPath, ['uploads/logo.png']);
+                $this->settingModel->setValue('app_logo', $upload['path'], 'appearance');
+                $messages[] = 'Logo berhasil diperbarui.';
+            }
+        }
+
+        if ($faviconFile && $faviconFile->isValid()) {
+            $upload = $this->handleUpload('app_favicon', 'brand');
+
+            if (! $upload) {
+                $errors[] = 'Upload favicon gagal. Pastikan file adalah gambar valid.';
+            } else {
+                $oldPath = $this->settingModel->get('app_favicon');
+                $this->deleteOldFile($oldPath, ['uploads/favicon.ico']);
+                $this->settingModel->setValue('app_favicon', $upload['path'], 'appearance');
+                $messages[] = 'Favicon berhasil diperbarui.';
+            }
+        }
+
+        if (! empty($errors)) {
+            return redirect()->to('/admin/settings#tab-appearance')->with('error', implode(' ', $errors));
+        }
+
+        return redirect()->to('/admin/settings#tab-appearance')->with('success', implode(' ', $messages));
+    }
+
+    /**
+     * Upload & replace App Logo.
+     */
+    public function uploadLogo()
+    {
+        return $this->uploadBrand();
+    }
+
+    /**
+     * Upload & replace Favicon.
+     */
+    public function uploadFavicon()
+    {
+        return $this->uploadBrand();
+    }
+
+    /**
+     * Upload & store raw GeoJSON for city boundary.
+     * Accepts a *.geojson or *.json text file OR pasted text via textarea.
+     */
+    public function uploadGeoJson()
+    {
+        $pastedJson = trim((string) $this->request->getPost('city_boundary_geojson'));
+        $file = $this->request->getFile('geojson_file');
+
+        // File is prioritized when both file + textarea are filled.
+        $hasUploadedFile = $file && $file->getError() !== UPLOAD_ERR_NO_FILE;
+
+        if ($hasUploadedFile) {
+            if (! $file->isValid()) {
+                return redirect()->to('/admin/settings#tab-map')
+                    ->with('error', 'File GeoJSON tidak valid atau gagal diunggah.');
+            }
+
+            $content = file_get_contents($file->getTempName());
+            json_decode($content);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return redirect()->to('/admin/settings#tab-map')
+                    ->with('error', 'File bukan GeoJSON valid: ' . json_last_error_msg());
+            }
+
+            $this->settingModel->setValue('city_boundary_geojson', $content, 'map');
+            return redirect()->to('/admin/settings#tab-map')->with('success', 'Batas wilayah (GeoJSON) berhasil dimuat dari file.');
+        }
+
+        if ($pastedJson !== '') {
+            json_decode($pastedJson);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return redirect()->to('/admin/settings#tab-map')
+                    ->with('error', 'GeoJSON tidak valid: ' . json_last_error_msg());
+            }
+
+            $this->settingModel->setValue('city_boundary_geojson', $pastedJson, 'map');
+            return redirect()->to('/admin/settings#tab-map')->with('success', 'Batas wilayah (GeoJSON) disimpan.');
+        }
+
+        return redirect()->to('/admin/settings#tab-map')->with('error', 'Isi GeoJSON dari file atau textarea terlebih dahulu.');
+    }
+
+    /**
+     * Test SMTP config from current form values without saving it.
+     */
+    public function testSmtp()
+    {
+        $smtpHost = trim((string) $this->request->getPost('smtp_host'));
+        $smtpPort = (int) $this->request->getPost('smtp_port');
+        $smtpUser = trim((string) $this->request->getPost('smtp_user'));
+        $smtpPass = (string) $this->request->getPost('smtp_pass');
+        $smtpFrom = trim((string) $this->request->getPost('smtp_from_name'));
+        $smtpCrypto = strtolower(trim((string) $this->request->getPost('smtp_crypto')));
+        $testTo = trim((string) $this->request->getPost('smtp_test_to'));
+
+        if ($smtpHost === '' || $smtpPort <= 0 || $smtpUser === '' || $smtpPass === '' || $testTo === '') {
+            return redirect()->to('/admin/settings#tab-mail')
+                ->with('error', 'Lengkapi SMTP Host, Port, Username, Password, dan Email Tujuan Tes terlebih dahulu.');
+        }
+
+        if (! filter_var($testTo, FILTER_VALIDATE_EMAIL)) {
+            return redirect()->to('/admin/settings#tab-mail')
+                ->with('error', 'Email Tujuan Tes tidak valid.');
+        }
+
+        if (! in_array($smtpCrypto, ['tls', 'ssl', 'none'], true)) {
+            $smtpCrypto = 'tls';
+        }
+
+        $email = \Config\Services::email();
+        $email->initialize([
+            'protocol'   => 'smtp',
+            'SMTPHost'   => $smtpHost,
+            'SMTPPort'   => $smtpPort,
+            'SMTPUser'   => $smtpUser,
+            'SMTPPass'   => $smtpPass,
+            'SMTPCrypto' => $smtpCrypto === 'none' ? '' : $smtpCrypto,
+            'fromEmail'  => $smtpUser,
+            'fromName'   => $smtpFrom !== '' ? $smtpFrom : 'SAMPAHAN',
+            'mailType'   => 'html',
+            'charset'    => 'UTF-8',
+            'newline'    => "\r\n",
+            'CRLF'       => "\r\n",
+        ]);
+
+        $email->setFrom($smtpUser, $smtpFrom !== '' ? $smtpFrom : 'SAMPAHAN');
+        $email->setTo($testTo);
+        $email->setSubject('Test SMTP - SAMPAHAN');
+        $email->setMessage('<p>Ini adalah email uji koneksi SMTP dari panel admin SAMPAHAN.</p><p>Jika email ini diterima, konfigurasi SMTP Anda valid.</p>');
+
+        if (! $email->send()) {
+            log_message('error', '[SMTP TEST] Failed: ' . $email->printDebugger(['headers']));
+            return redirect()->to('/admin/settings#tab-mail')
+                ->with('error', 'Test SMTP gagal. Periksa host, port, enkripsi, username/password, dan koneksi server.');
+        }
+
+        return redirect()->to('/admin/settings#tab-mail')
+            ->with('success', 'Test SMTP berhasil. Email uji terkirim ke ' . $testTo . '.');
+    }
+
+    // ─── Private helpers ─────────────────────────────────────────────────────
+
+    private function deleteOldFile(?string $relativePath, array $keepDefaults = []): void
+    {
+        if (! $relativePath || in_array($relativePath, $keepDefaults, true)) {
+            return;
+        }
+
+        $abs = FCPATH . $relativePath;
+        if (is_file($abs)) {
+            @unlink($abs);
+        }
+    }
+}
